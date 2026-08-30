@@ -152,6 +152,52 @@ async function runTool(name: string, args: any) {
   }
 }
 
+function isGroupMap(obj: any): boolean {
+  return (
+    obj &&
+    typeof obj === "object" &&
+    !Array.isArray(obj) &&
+    Object.values(obj).some(
+      (v) => v && typeof v === "object" && ("totalValue" in (v as any) || "totalBilled" in (v as any))
+    )
+  );
+}
+
+function groupToChartArray(group: Record<string, any>): { name: string; value: number }[] {
+  return Object.entries(group).map(([name, v]: [string, any]) => ({
+    name,
+    value: v.totalValue ?? v.totalBilled ?? 0,
+  }));
+}
+
+function prettyLabel(key: string): string {
+  return key
+    .replace(/([A-Z])/g, " $1")
+    .replace(/^./, (s) => s.toUpperCase())
+    .trim();
+}
+
+// Fallback: chart any top-level numeric fields directly (e.g. dealCount,
+// totalValue, missingValueCount) when there's no group breakdown. Needs
+// at least 2 numbers -- a single value has nothing to compare against.
+function extractScalarChart(obj: any): { name: string; value: number }[] | null {
+  if (!obj || typeof obj !== "object") return null;
+  const numeric = Object.entries(obj).filter(([, v]) => typeof v === "number");
+  if (numeric.length < 2) return null;
+  return numeric.map(([k, v]) => ({ name: prettyLabel(k), value: v as number }));
+}
+
+// Extracts the best chartable {name,value}[] from a tool result: prefer
+// a group breakdown (sector/stage/status), then a nested byStage/byStatus,
+// then fall back to top-level numeric fields.
+function buildChartData(result: any): { name: string; value: number }[] | null {
+  if (!result || typeof result !== "object") return null;
+  if (isGroupMap(result)) return groupToChartArray(result);
+  if (isGroupMap(result.byStage)) return groupToChartArray(result.byStage);
+  if (isGroupMap(result.byStatus)) return groupToChartArray(result.byStatus);
+  return extractScalarChart(result);
+}
+
 const SYSTEM_PROMPT = `You are the Skylark BI Copilot, a friendly and sharp business intelligence assistant for Skylark Drones' founders and executives.
 
 Today's date is ${new Date().toDateString()}.
@@ -159,11 +205,17 @@ Today's date is ${new Date().toDateString()}.
 Rules:
 - Always use the provided tools to fetch real data before answering -- never guess numbers.
 - When a question mentions a sector and/or time period (e.g. "mining pipeline this quarter"), use get_filtered_pipeline for an EXACT answer instead of approximating with other tools.
-- When a question is ambiguous in a way that would seriously change the answer, ask one short clarifying question instead of guessing.
+- If a short or vague question could reasonably map to a tool with a sensible default (e.g. "mining sector information" -> get_filtered_pipeline with sector "Mining"), just call it -- do not ask for clarification on the first pass.
+- Ask at most ONE clarifying question total per user request, and only if you genuinely cannot pick any reasonable tool call. After that one clarification (or if none is needed), commit to your best interpretation and answer -- do not ask a second clarifying question in the same topic.
+- As soon as you have tool results that reasonably answer the question, respond with final text immediately. Do not call additional tools "just in case" unless the question explicitly needs another board's data.
 - Always mention relevant data-quality caveats (e.g. "X% of records are missing this field") when they materially affect the answer.
 - Give insights, not just numbers: point out what's notable, risky, or worth attention.
 - Keep answers concise and founder-friendly -- no jargon, no walls of text.
-- All monetary values are in Rupees.`;
+- All monetary values are in Rupees.
+- Never generate your own charts, graphs, tables-as-images, mermaid diagrams, ASCII charts, or links to external chart-generation services (e.g. quickchart.io). You cannot render visuals yourself.
+- If the user asks for a chart, graph, or visualization, mention that it's shown above your reply -- the frontend renders it automatically, you never need to produce it yourself.`;
+
+const MAX_TURNS = 8;
 
 export async function runAgent(
   userMessage: string,
@@ -175,10 +227,9 @@ export async function runAgent(
     { role: "user", content: userMessage },
   ];
 
-  let lastToolName: string | null = null;
-  let lastToolResult: any = null;
+  const toolLog: any[] = [];
 
-  for (let i = 0; i < 5; i++) {
+  for (let i = 0; i < MAX_TURNS; i++) {
     const completion = await groq.chat.completions.create({
       model: "openai/gpt-oss-120b",
       messages,
@@ -190,7 +241,8 @@ export async function runAgent(
     const toolCalls = choice.message.tool_calls;
 
     if (!toolCalls || toolCalls.length === 0) {
-      return { reply: choice.message.content, toolName: lastToolName, toolResult: lastToolResult };
+      const chartData = [...toolLog].reverse().map(buildChartData).find((c) => c !== null) ?? null;
+      return { reply: choice.message.content, chartData };
     }
 
     messages.push(choice.message);
@@ -198,15 +250,14 @@ export async function runAgent(
     for (const call of toolCalls) {
       const args = JSON.parse(call.function.arguments || "{}");
       const result = await runTool(call.function.name, args);
-      lastToolName = call.function.name;
-      lastToolResult = result;
+      toolLog.push(result);
       messages.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify(result) });
     }
   }
 
+  const chartData = [...toolLog].reverse().map(buildChartData).find((c) => c !== null) ?? null;
   return {
-    reply: "I wasn't able to finish gathering the data for that -- could you try rephrasing your question?",
-    toolName: null,
-    toolResult: null,
+    reply: "I wasn't able to fully finish gathering data for that -- could you try a more specific question, e.g. naming a sector or metric?",
+    chartData,
   };
 }
