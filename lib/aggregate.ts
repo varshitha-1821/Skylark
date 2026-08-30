@@ -74,3 +74,62 @@ export function joinDealsToWorkOrders(deals: Deal[], orders: WorkOrder[]) {
     matchedWorkOrders: orderByName.get(deal.dealName?.trim().toLowerCase() ?? "") ?? [],
   }));
 }
+
+// --- Precise filtering, added to avoid the agent having to approximate ---
+
+// Parses a quarter label like "Q3 2026" into its date range.
+function getQuarterBounds(quarterLabel: string): { start: Date; end: Date } | null {
+  const match = quarterLabel.match(/Q([1-4])\s*(\d{4})/i);
+  if (!match) return null;
+  const quarter = parseInt(match[1]);
+  const year = parseInt(match[2]);
+  const startMonth = (quarter - 1) * 3;
+  return {
+    start: new Date(year, startMonth, 1),
+    end: new Date(year, startMonth + 3, 1),
+  };
+}
+
+type DealFilter = {
+  sector?: string;
+  status?: string;
+  dealStage?: string;
+  closingQuarter?: string; // e.g. "Q3 2026" -- filtered against tentativeCloseDate
+};
+
+export function filterDeals(deals: Deal[], filter: DealFilter) {
+  const quarterBounds = filter.closingQuarter ? getQuarterBounds(filter.closingQuarter) : null;
+
+  return deals.filter((d) => {
+    if (filter.sector && d.sector?.toLowerCase() !== filter.sector.toLowerCase()) return false;
+    if (filter.status && d.status !== filter.status) return false;
+    if (filter.dealStage && d.dealStage !== filter.dealStage) return false;
+    if (quarterBounds) {
+      if (!d.tentativeCloseDate) return false;
+      const date = new Date(d.tentativeCloseDate);
+      if (date < quarterBounds.start || date >= quarterBounds.end) return false;
+    }
+    return true;
+  });
+}
+
+export function summarizeDeals(deals: Deal[]) {
+  const withValue = deals.filter((d) => d.dealValue !== null);
+  return {
+    dealCount: deals.length,
+    totalValue: withValue.reduce((sum, d) => sum + (d.dealValue ?? 0), 0),
+    missingValueCount: deals.length - withValue.length,
+    byStage: groupDealsBy(deals, "dealStage"),
+    byStatus: groupDealsBy(deals, "status"),
+  };
+}
+
+// Flags deals whose tentativeCloseDate has already passed while status
+// is still Open -- a sign of a stale/un-updated pipeline entry rather
+// than a genuinely empty pipeline.
+export function findStaleOpenDeals(deals: Deal[], asOf: Date = new Date()) {
+  return deals.filter((d) => {
+    if (d.status !== "Open" || !d.tentativeCloseDate) return false;
+    return new Date(d.tentativeCloseDate) < asOf;
+  });
+}
