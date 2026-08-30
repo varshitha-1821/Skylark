@@ -25,6 +25,21 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [chart, setChart] = useState<{ name: string; value: number }[] | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const [leadership, setLeadership] = useState<any>(null);
+const [leadershipLoading, setLeadershipLoading] = useState(false);
+
+async function generateLeadershipUpdate() {
+  setLeadershipLoading(true);
+  try {
+    const res = await fetch("/api/leadership-update");
+    const data = await res.json();
+    setLeadership(data);
+  } catch {
+    setLeadership({ error: "Failed to generate update." });
+  } finally {
+    setLeadershipLoading(false);
+  }
+}
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -60,9 +75,32 @@ export default function Home() {
       <header className="px-6 py-4 border-b border-slate-800">
         <h1 className="text-lg font-semibold">Skylark BI Copilot</h1>
         <p className="text-sm text-slate-400">Ask about your pipeline or work orders</p>
+        <button
+  onClick={generateLeadershipUpdate}
+  disabled={leadershipLoading}
+  className="mt-2 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-sm px-4 py-1.5 rounded-lg font-medium"
+>
+  {leadershipLoading ? "Generating..." : "Leadership Update"}
+</button>
       </header>
 
       <div className="flex-1 overflow-y-auto px-6 py-4 space-y-4">
+        {leadership && !leadership.error && (
+  <div className="bg-emerald-950/40 border border-emerald-800 rounded-xl p-4 text-sm space-y-2">
+    <h2 className="font-semibold text-emerald-300">Leadership Update</h2>
+    <p>
+      <span className="text-slate-400">Open pipeline: </span>
+      {leadership.pipeline.totalOpenDeals} deals, ₹{leadership.pipeline.totalOpenValue.toLocaleString()}
+    </p>
+    <p>
+      <span className="text-slate-400">Won deals without a work order: </span>
+      {leadership.risks.wonDealsWithoutWorkOrder} / {leadership.risks.totalWonDeals}
+    </p>
+    <p className="text-slate-400 text-xs">
+      Generated {new Date(leadership.generatedAt).toLocaleString()}
+    </p>
+  </div>
+)}
         {messages.map((m, i) => (
           <div key={i} className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}>
             <div
